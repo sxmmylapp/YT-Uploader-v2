@@ -1,0 +1,39 @@
+# Environment and secrets
+.env
+client_secrets.json
+token.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+.venv/
+
+# Logs
+logs/
+*.log
+
+# Video files
+*.mp4
+*.mov
+*.m4v
+*.avi
+*.mkv
+
+# State files
+video_state.json
+pending_videos/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo

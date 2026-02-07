@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ytuploader.watcher.v2</string>
+    
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/sammylapp/.gemini/antigravity/Workspaces/YT Uploader v2/execution/run_watcher.sh</string>
+    </array>
+    
+    <key>WorkingDirectory</key>
+    <string>/Users/sammylapp/.gemini/antigravity/Workspaces/YT Uploader v2/execution</string>
+    
+    <key>RunAtLoad</key>
+    <true/>
+    
+    <key>KeepAlive</key>
+    <true/>
+    
+    <key>StandardOutPath</key>
+    <string>/Users/sammylapp/.gemini/antigravity/Workspaces/YT Uploader v2/logs/watcher/stdout.log</string>
+    
+    <key>StandardErrorPath</key>
+    <string>/Users/sammylapp/.gemini/antigravity/Workspaces/YT Uploader v2/logs/watcher/stderr.log</string>
+    
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+</dict>
+</plist>

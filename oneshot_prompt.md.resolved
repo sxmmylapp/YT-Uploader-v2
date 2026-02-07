@@ -1,0 +1,267 @@
+## Build a YouTube Video Uploader with iCloud Watcher and Telegram Integration
+
+I need you to build a complete video upload automation system with these components:
+
+### System Architecture
+
+```
+┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
+│   iCloud Drive  │────▶│  Mac (local)     │────▶│  Railway Server │
+│   VideoQueue/   │     │  watch_icloud.py │     │  server.py      │
+└─────────────────┘     └──────────────────┘     └─────────────────┘
+                                                         │
+                                                         ▼
+                                                 ┌───────────────┐
+                                                 │   Telegram    │
+                                                 │   Bot (user)  │
+                                                 └───────┬───────┘
+                                                         │
+                                                         ▼
+                                                 ┌───────────────┐
+                                                 │   YouTube     │
+                                                 │   (upload)    │
+                                                 └───────────────┘
+```
+
+---
+
+## Component 1: Local iCloud Watcher ([watch_icloud.py](file:///Users/sammylapp/.gemini/antigravity/Workspaces/YT%20Video%20Uploader/execution/watch_icloud.py))
+
+A Python script that runs on macOS and monitors an iCloud folder for new videos.
+
+### Requirements:
+1. **Folder Monitoring**: Poll `~/Library/Mobile Documents/com~apple~CloudDocs/VideoQueue/` every 3 seconds
+2. **Video Extensions**: Support `.mov`, `.mp4`, `.m4v`, `.avi`, `.mkv`
+3. **iCloud Placeholder Handling**: Use `brctl download` to force-download iCloud placeholders before processing
+4. **File Stability**: Wait for file size to stabilize (check size twice with 0.5s delay) before processing
+5. **Metadata Extraction**: Use ffprobe to get video duration (format: "M:SS") and creation time (format: "January 1st, 2025 at 2:00 PM")
+6. **Thumbnail Generation**: Use ffmpeg to extract a frame at 1 second as `.jpg` thumbnail
+7. **Telegram Preview**: Send thumbnail with caption "🎬 **filename**\n\n⏳ Uploading to server..." and store the `message_id`
+8. **Resumable Chunk Upload**: 
+   - Dynamic chunk sizing: 15MB for files <100MB, 25MB for 100MB-1GB, 50MB for >1GB
+   - Check `/upload_status?filename=X` before each chunk to get current offset
+   - Send chunks to `/upload_chunk` with headers: `X-Filename`, `X-Total-Size`, `X-Video-Creation-Time`, `X-Video-Duration`, `X-Offset`, `X-Message-Id`
+   - Handle 409 (offset mismatch) by retrying
+9. **Local Archive**: Copy video to `~/Local Documents/YT Video Archive/` before uploading (handle duplicate filenames with timestamp suffix)
+10. **Cleanup**: Delete video from VideoQueue after successful upload
+11. **Connection Pooling**: Use `requests.Session()` with retry strategy (3 retries, exponential backoff, retry on 429/500/502/503/504)
+
+### Environment Variables:
+```
+RAILWAY_URL=https://your-app.up.railway.app
+VIDEO_QUEUE_PATH=~/Library/Mobile Documents/com~apple~CloudDocs/VideoQueue
+TELEGRAM_BOT_TOKEN=your_bot_token
+TELEGRAM_USER_ID=your_user_id
+```
+
+---
+
+## Component 2: LaunchAgent for Background Service
+
+Create a macOS LaunchAgent plist ([com.ytuploader.watcher.plist](file:///Users/sammylapp/.gemini/antigravity/Workspaces/YT%20Video%20Uploader/com.ytuploader.watcher.plist)) that:
+1. Runs [watch_icloud.py](file:///Users/sammylapp/.gemini/antigravity/Workspaces/YT%20Video%20Uploader/execution/watch_icloud.py) via [/bin/bash](file:///bin/bash) wrapper script
+2. Keeps alive (restarts on crash)
+3. Runs at load (login)
+4. Logs to [logs/watcher/stdout.log](file:///Users/sammylapp/.gemini/antigravity/Workspaces/YT%20Video%20Uploader/logs/watcher/stdout.log) and [logs/watcher/stderr.log](file:///Users/sammylapp/.gemini/antigravity/Workspaces/YT%20Video%20Uploader/logs/watcher/stderr.log)
+5. Sets `PYTHONUNBUFFERED=1` for immediate logging
+
+Also create a wrapper script [run_watcher.sh](file:///Users/sammylapp/.gemini/antigravity/Workspaces/YT%20Video%20Uploader/execution/run_watcher.sh) that activates the Python virtualenv and runs the watcher.
+
+---
+
+## Component 3: Railway Server ([server.py](file:///Users/sammylapp/.gemini/antigravity/Workspaces/YT%20Video%20Uploader/server.py))
+
+A Flask web application hosted on Railway that handles uploads, Telegram webhooks, and YouTube uploads.
+
+### Flask Endpoints:
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/` | GET | Health check, returns `{"status": "running", "pending_videos": N}` |
+| `/upload_chunk` | POST | Receive chunked uploads, returns `{"status": "partial/complete", "offset": N}` |
+| `/upload_status` | GET | Return current offset for resumable uploads |
+| `/upload` | POST | Direct multipart upload (fallback) |
+| `/webhook` | POST | Telegram webhook handler |
+| `/preview/<video_id>` | GET | Serve video file for preview |
+| `/status` | GET | Server status with pending video details |
+| `/uploaded_today` | GET | List filenames uploaded to YouTube in last 24h |
+| `/recent_videos` | GET | List recent YouTube videos with URLs |
+| `/pending` | GET | JSON list of all pending videos |
+| `/retry_notify/<video_id>` | POST | Manually re-send Telegram notification |
+| `/delete/<video_id>` | POST/DELETE | Delete specific pending video |
+| `/cleanup` | POST | Delete all pending videos |
+| `/cleanup_stale` | POST | Delete videos older than 7 days |
+| `/debug/config` | GET | Check if env vars are set |
+
+### Telegram Webhook Handler:
+
+**Callback Queries (Button Presses):**
+1. `action:no:<video_id>` → Show delete confirmation
+2. `confirm:yes:<video_id>` → Delete video file
+3. `confirm:no:<video_id>` → Go back to privacy selection
+4. `privacy:public/unlisted/private:<video_id>` → Store privacy, show Upload/Delete confirmation
+5. `action:yes:<video_id>` → Start background YouTube upload thread
+6. `cleanup:yes:all` / `cleanup:no:all` → Bulk delete confirmation
+
+**Text Messages:**
+1. If starts with `/` → Handle commands
+2. If reply to a pending video message → Set title, show privacy selection
+
+**Bot Commands:**
+- `/start` → Welcome message with instructions
+- `/check` → Bot status and pending count
+- `/pending` → List all pending videos with states
+- `/cleanup` → Bulk delete with confirmation
+
+**Single Message UX:**
+- All updates should edit the SAME message (no spam)
+- Use `edit_message_text` for all state transitions
+- Only `send_message` is OK for: brother notification (different user), error fallbacks
+
+### State Management:
+- Store pending videos in Python dict: `video_id → {path, filename, size_mb, uploaded_at, creation_time, duration_sec, state, title, privacy, chat_id, message_id}`
+- Persist to JSON file (`video_state.json`) after every change
+- Load state on startup
+- States: `awaiting_action`, `awaiting_title`, `awaiting_privacy`, `ready_to_upload`
+
+### YouTube Upload (Background Thread):
+1. Create new asyncio event loop in thread
+2. Update Telegram message to "⏳ Uploading to YouTube..."
+3. Show progress bar (update every 5 seconds): `▓▓▓▓▓░░░░░ 50%`
+4. Before upload: Check if video is portrait (height > width) → rotate 90° clockwise with ffmpeg
+5. Upload using `MediaFileUpload` with resumable=True
+6. Set metadata: title (max 100 chars), description (includes original filename + creation time), tags `['volleyball', 'vball']`, category 17 (Sports), privacy status
+7. After upload: Check status immediately for rejection (duplicate/copyright)
+8. Poll for processing completion (every 30s, max 10 minutes)
+9. On success: Edit message to "✅ Ready to Watch!" with YouTube URL
+10. On rejection: Edit message to "⚠️ Upload Rejected" with reason
+11. If video > 10 minutes and `TELEGRAM_BROTHER_ID` is set: Send notification to brother
+
+### Background Threads:
+1. **Stale Cleanup Thread**: Delete videos older than 7 days, runs every 24 hours
+2. **Pending Reminder Thread**: Send Telegram reminder about pending videos every 1 hour (only for videos pending > 1 hour)
+
+### Startup:
+1. Auto-register Telegram webhook to `/webhook` endpoint
+2. Start background threads as daemons
+3. Log "🚀 YT Video Uploader server started"
+
+### Environment Variables (Railway):
+```
+TELEGRAM_BOT_TOKEN=your_bot_token
+TELEGRAM_USER_ID=your_user_id
+TELEGRAM_BROTHER_ID=brother_user_id  # Optional
+GOOGLE_CREDENTIALS='{"token":"...", "refresh_token":"...", ...}'  # Full OAuth JSON
+WEBHOOK_SECRET=optional_secret
+```
+
+---
+
+## Component 4: Logging Infrastructure
+
+Create [logging_config.py](file:///Users/sammylapp/.gemini/antigravity/Workspaces/YT%20Video%20Uploader/execution/logging_config.py) with:
+
+1. **VideoHistoryLogger class**: JSONL audit trail
+   - [log_video_detected](file:///Users/sammylapp/.gemini/antigravity/Workspaces/YT%20Video%20Uploader/execution/logging_config.py#49-54), [log_upload_started](file:///Users/sammylapp/.gemini/antigravity/Workspaces/YT%20Video%20Uploader/execution/logging_config.py#55-57), [log_upload_progress](file:///Users/sammylapp/.gemini/antigravity/Workspaces/YT%20Video%20Uploader/execution/logging_config.py#58-64), [log_upload_complete](file:///Users/sammylapp/.gemini/antigravity/Workspaces/YT%20Video%20Uploader/execution/logging_config.py#65-69), [log_upload_failed](file:///Users/sammylapp/.gemini/antigravity/Workspaces/YT%20Video%20Uploader/execution/logging_config.py#70-72), [log_telegram_sent](file:///Users/sammylapp/.gemini/antigravity/Workspaces/YT%20Video%20Uploader/execution/logging_config.py#73-75), [log_telegram_updated](file:///Users/sammylapp/.gemini/antigravity/Workspaces/YT%20Video%20Uploader/execution/logging_config.py#76-81)
+   - Store in [logs/history/video_history.jsonl](file:///Users/sammylapp/.gemini/antigravity/Workspaces/YT%20Video%20Uploader/logs/history/video_history.jsonl)
+
+2. **setup_watcher_logging()**: Returns (logger, history)
+   - Main log: [logs/watcher/watcher.log](file:///Users/sammylapp/.gemini/antigravity/Workspaces/YT%20Video%20Uploader/logs/watcher/watcher.log) (daily rotation, 7 days)
+   - Error log: [logs/watcher/watcher_errors.log](file:///Users/sammylapp/.gemini/antigravity/Workspaces/YT%20Video%20Uploader/logs/watcher/watcher_errors.log) (daily, 30 days)
+   - Debug log: [logs/watcher/watcher_debug.log](file:///Users/sammylapp/.gemini/antigravity/Workspaces/YT%20Video%20Uploader/logs/watcher/watcher_debug.log) (daily, 3 days)
+   - JSON log: [logs/watcher/watcher_structured.jsonl](file:///Users/sammylapp/.gemini/antigravity/Workspaces/YT%20Video%20Uploader/logs/watcher/watcher_structured.jsonl) (for programmatic analysis)
+   - Console output: INFO level
+
+3. **log_exception()**: Helper to log exceptions with full traceback
+
+---
+
+## Component 5: Dependencies
+
+### [requirements.txt](file:///Users/sammylapp/.gemini/antigravity/Workspaces/YT%20Video%20Uploader/requirements.txt):
+```
+flask>=3.0.0
+python-telegram-bot>=21.0
+python-dotenv>=1.0.0
+google-auth>=2.0.0
+google-auth-oauthlib>=1.0.0
+google-api-python-client>=2.0.0
+gunicorn>=21.0.0
+requests>=2.31.0
+```
+
+### [Procfile](file:///Users/sammylapp/.gemini/antigravity/Workspaces/YT%20Video%20Uploader/Procfile) (Railway):
+```
+web: gunicorn server:app --bind 0.0.0.0:$PORT
+```
+
+### [nixpacks.toml](file:///Users/sammylapp/.gemini/antigravity/Workspaces/YT%20Video%20Uploader/nixpacks.toml) (Railway - for ffmpeg):
+```toml
+[phases.setup]
+nixPkgs = ["ffmpeg"]
+```
+
+### Binary Dependencies:
+- Include pre-compiled [ffmpeg](file:///Users/sammylapp/.gemini/antigravity/Workspaces/YT%20Video%20Uploader/bin/ffmpeg) and [ffprobe](file:///Users/sammylapp/.gemini/antigravity/Workspaces/YT%20Video%20Uploader/bin/ffprobe) in `bin/` folder for local use
+
+---
+
+## Component 6: OAuth Helper
+
+Create [get_credentials.py](file:///Users/sammylapp/.gemini/antigravity/Workspaces/YT%20Video%20Uploader/execution/get_credentials.py):
+1. Load [client_secrets.json](file:///Users/sammylapp/.gemini/antigravity/Workspaces/YT%20Video%20Uploader/client_secrets.json) from project root
+2. Run OAuth flow with scopes: `youtube.upload`, `youtube.readonly`, `drive`
+3. Save token to [token.json](file:///Users/sammylapp/.gemini/antigravity/Workspaces/YT%20Video%20Uploader/token.json) or print as JSON for Railway env var
+
+---
+
+## Directory Structure:
+
+```
+/
+├── server.py                    # Flask server (Railway)
+├── requirements.txt
+├── Procfile
+├── nixpacks.toml
+├── railway.toml
+├── client_secrets.json          # Google OAuth client (gitignored)
+├── token.json                   # OAuth token (gitignored)
+├── .env                         # Local environment variables
+├── .gitignore
+├── com.ytuploader.watcher.plist # LaunchAgent
+├── bin/
+│   ├── ffmpeg                   # Pre-compiled binary
+│   └── ffprobe                  # Pre-compiled binary
+├── execution/
+│   ├── watch_icloud.py          # Local watcher script
+│   ├── run_watcher.sh           # Wrapper for LaunchAgent
+│   ├── logging_config.py        # Logging configuration
+│   └── get_credentials.py       # OAuth helper
+├── logs/
+│   ├── watcher/                 # Watcher logs
+│   └── history/                 # Video history JSONL
+└── directives/
+    └── video_upload_workflow.md # Documentation
+```
+
+---
+
+## Key Implementation Details:
+
+1. **Single Message UX**: The watcher sends an initial Telegram message with thumbnail. ALL subsequent updates (title set, privacy selected, uploading progress, completion) should EDIT that same message using `edit_message_text`. Never send new messages for the same video.
+
+2. **Message ID Tracking**: The watcher's `message_id` is passed to the server via `X-Message-Id` header. Server uses `edit_message_caption` to update the watcher's message. If the watcher didn't send a message, server sends a new one.
+
+3. **Duplicate Prevention**: Before creating a new pending video entry, check if a video with the same filename already exists in pending. If so, skip to avoid "New Video" spam.
+
+4. **Portrait Rotation**: Before YouTube upload, check dimensions with ffprobe. If height > width, rotate 90° clockwise with ffmpeg's `transpose=1` filter.
+
+5. **Resumable Uploads**: Client checks `/upload_status` before each chunk to get current offset. If offset mismatch (409), retry from the correct offset. This handles network interruptions gracefully.
+
+6. **OAuth Token Refresh**: The [get_youtube_service()](file:///Users/sammylapp/.gemini/antigravity/Workspaces/YT%20Video%20Uploader/server.py#97-112) function auto-refreshes expired tokens using the refresh_token and updates the `GOOGLE_CREDENTIALS` env var.
+
+7. **Error Recovery**: If Telegram message edit fails, retry with exponential backoff (up to 5 attempts). If all fail, fall back to sending a new message (breaks single-message UX but better than silent failure).
+
+---
+
+Build all of this as a complete, working application. Create all files with proper error handling and logging. The system should be production-ready for Railway deployment and reliable local execution.
