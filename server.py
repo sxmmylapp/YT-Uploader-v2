@@ -910,23 +910,30 @@ def register_webhook():
 
 def startup():
     """Initialize server on startup."""
-    load_state()
-    
-    # Start background threads
-    threading.Thread(target=stale_cleanup_thread, daemon=True).start()
-    threading.Thread(target=pending_reminder_thread, daemon=True).start()
-    
-    # Register webhook
-    if TELEGRAM_BOT_TOKEN:
-        register_webhook()
-    
-    app.logger.info("🚀 YT Video Uploader server started")
+    try:
+        load_state()
+        
+        # Start background threads
+        threading.Thread(target=stale_cleanup_thread, daemon=True).start()
+        threading.Thread(target=pending_reminder_thread, daemon=True).start()
+        
+        # Register webhook
+        if TELEGRAM_BOT_TOKEN:
+            register_webhook()
+        
+        app.logger.info("🚀 YT Video Uploader server started")
+    except Exception as e:
+        app.logger.error(f"Startup error (non-fatal): {e}")
 
 
-# Run startup on import (for gunicorn)
-startup()
+# Run startup on import (for gunicorn) - wrapped in try/except
+try:
+    startup()
+except Exception as e:
+    print(f"Warning: startup failed: {e}")
 
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=True)
+
